@@ -259,11 +259,12 @@ static void
 ftl_io_init(struct ftl_io *io, struct spdk_ftl_dev *dev,
 	    ftl_io_fn fn, void *ctx, int flags, int type)
 {
-	io->flags |= flags | FTL_IO_INITIALIZED;
+	//### hjim: set every io to PPA and Direct mode
+	io->flags |= flags | FTL_IO_INITIALIZED | FTL_IO_PPA_MODE | FTL_IO_DIRECT_ACCESS;
 	io->type = type;
 	io->dev = dev;
 	io->lba.single = FTL_LBA_INVALID;
-	io->ppa.ppa = FTL_PPA_INVALID;
+	//io->ppa.ppa = FTL_PPA_INVALID;
 	io->cb_fn = fn;
 	io->cb_ctx = ctx;
 	io->trace = ftl_trace_alloc_id(dev);

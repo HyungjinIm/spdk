@@ -417,6 +417,7 @@ ftl_band_tail_md_ppa(struct ftl_band *band)
 	ppa.pu = chunk->punit->start_ppa.pu;
 	ppa.grp = chunk->punit->start_ppa.grp;
 
+	//SPDK_NOTICELOG("### lbk %d, chk %d, pu %d, grp %d\n", ppa.lbk, ppa.chk, ppa.pu, ppa.grp);
 	return ppa;
 }
 
@@ -763,7 +764,8 @@ ftl_io_init_md_write(struct spdk_ftl_dev *dev, struct ftl_band *band,
 		.rwb_batch	= NULL,
 		.band		= band,
 		.size		= sizeof(struct ftl_io),
-		.flags		= FTL_IO_MD | FTL_IO_PPA_MODE,
+		//### hjim: Need direct io mode to issue PPA based write cmds
+		.flags		= FTL_IO_MD | FTL_IO_PPA_MODE | FTL_IO_DIRECT_ACCESS,
 		.type		= FTL_IO_WRITE,
 		.lbk_cnt	= lbk_cnt,
 		.cb_fn		= cb,
@@ -785,6 +787,15 @@ ftl_band_write_md(struct ftl_band *band, size_t lbk_cnt,
 	if (!io) {
 		return -ENOMEM;
 	}
+
+	//### hjim test
+	//ftl_band_set_direct_access(band, true);
+	//wptr = ftl_wptr_init(band);
+	//if (!wptr) {
+	//	return -1;
+	//}
+	//wptr->direct_mode = true;
+	//SPDK_NOTICELOG("### Set direct mode\n");
 
 	md_fn(band);
 
