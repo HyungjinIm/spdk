@@ -329,8 +329,8 @@ ftl_wptr_open_band(struct ftl_wptr *wptr)
 	assert(band->state == FTL_BAND_STATE_PREP);
 	ftl_band_set_state(band, FTL_BAND_STATE_OPENING);
 
-	//### hjim: set always true for ppa mode
-	wptr->direct_mode = true;
+	/* [ocssd] set always true for ppa mode */
+	//wptr->direct_mode = true;
 
 	return ftl_band_write_head_md(band, ftl_md_write_cb);
 }
@@ -475,7 +475,7 @@ ftl_add_direct_wptr(struct ftl_band *band)
 	struct spdk_ftl_dev *dev = band->dev;
 	struct ftl_wptr *wptr;
 
-	// ### hjim: temp disabled - Need when STATE_OPENING
+	// [ocssd] temporarily disabled - Need when STATE_OPENING
 	//assert(band->state == FTL_BAND_STATE_OPEN);
 
 	wptr = ftl_wptr_init(band);
@@ -962,7 +962,7 @@ ftl_submit_read(struct ftl_io *io)
 
 	assert(LIST_EMPTY(&io->children));
 
-	SPDK_NOTICELOG("### read mode = %d, ppa 0x%x, grp %d, pu %d, chk %d, lbk %d\n",
+	SPDK_NOTICELOG("[ocssd] read mode = %d, ppa 0x%x, grp %d, pu %d, chk %d, lbk %d\n",
 					ftl_io_mode_ppa(io), ppa, io->ppa.grp, io->ppa.pu, io->ppa.chk, io->ppa.lbk);
 	while (io->pos < io->lbk_cnt) {
 		if (ftl_io_mode_ppa(io)) {
@@ -990,7 +990,7 @@ ftl_submit_read(struct ftl_io *io)
 		assert(lbk_cnt > 0);
 
 		ftl_trace_submission(dev, io, ppa, lbk_cnt);
-/* ### hjim: change default read cmds to Vectored Read (92h)
+/* [ocssd] changed default read cmds to Vectored Read (92h)
 		rc = spdk_nvme_ns_cmd_read(dev->ns, ftl_get_read_qpair(dev),
 					   ftl_io_iovec_addr(io),
 					   ftl_ppa_addr_pack(io->dev, ppa), lbk_cnt,
@@ -999,7 +999,7 @@ ftl_submit_read(struct ftl_io *io)
 		rc = spdk_nvme_ocssd_ns_cmd_vector_read(dev->ns,
 												ftl_get_read_qpair(dev),
 												ftl_io_iovec_addr(io),
-												ftl_ppa_addr_pack(io->dev, ppa), lbk_cnt,
+												io->iov, lbk_cnt,
 												ftl_io_cmpl_cb, io, 0);
 
 		if (spdk_unlikely(rc)) {
@@ -1502,7 +1502,7 @@ ftl_submit_child_write(struct ftl_wptr *wptr, struct ftl_io *io, int lbk_cnt)
 		ppa = wptr->ppa;
 	} else {
 		assert(io->flags & FTL_IO_DIRECT_ACCESS);
-		SPDK_NOTICELOG("### io->ppa.chk %d, wptr->band->id %d\n", io->ppa.chk, wptr->band->id);
+		SPDK_NOTICELOG("[ocssd] io->ppa.chk %d, wptr->band->id %d\n", io->ppa.chk, wptr->band->id);
 		assert(io->ppa.chk == wptr->band->id);
 		ppa = io->ppa;
 	}
@@ -1514,12 +1514,12 @@ ftl_submit_child_write(struct ftl_wptr *wptr, struct ftl_io *io, int lbk_cnt)
 		return -EAGAIN;
 	}
 
-	SPDK_NOTICELOG("### ppa 0x%x, grp %d, pu %d, chk %d, lbk %d\n",
+	SPDK_NOTICELOG("[ocssd] ppa 0x%x, grp %d, pu %d, chk %d, lbk %d\n",
 					ppa, io->ppa.grp, io->ppa.pu, io->ppa.chk, io->ppa.lbk);
 
 
 	wptr->num_outstanding++;
-/* ### hjim: change default write cmds to Vectored Read (91h)
+/* [ocssd] changed default write cmds to Vectored Write (91h)
 	rc = spdk_nvme_ns_cmd_write_with_md(dev->ns, ftl_get_write_qpair(dev),
 					    ftl_io_iovec_addr(child), child->md,
 					    ftl_ppa_addr_pack(dev, ppa),
@@ -1529,7 +1529,7 @@ ftl_submit_child_write(struct ftl_wptr *wptr, struct ftl_io *io, int lbk_cnt)
 						ftl_get_write_qpair(dev),
 					    ftl_io_iovec_addr(child),
 						child->md,
-					    ftl_ppa_addr_pack(dev, ppa),
+					    io->iov,
 					    lbk_cnt, ftl_io_cmpl_cb, child, 0);
 	if (rc) {
 		wptr->num_outstanding--;

@@ -259,7 +259,7 @@ static void
 ftl_io_init(struct ftl_io *io, struct spdk_ftl_dev *dev,
 	    ftl_io_fn fn, void *ctx, int flags, int type)
 {
-	//### hjim: set every io to PPA and Direct mode
+	/* [ocssd] set every io to PPA & Direct mode */
 	io->flags |= flags | FTL_IO_INITIALIZED | FTL_IO_PPA_MODE | FTL_IO_DIRECT_ACCESS;
 	io->type = type;
 	io->dev = dev;

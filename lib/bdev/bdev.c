@@ -4148,15 +4148,15 @@ spdk_bdev_start(struct spdk_bdev *bdev)
 		return;
 	}
 
-/* ### hjim: temporarily skip vbdev_gpt_examine as we don't use gpt partition
+	/* [ocssd] temporarily skip vbdev_gpt_examine as we don't use gpt partition */
 	TAILQ_FOREACH(module, &g_bdev_mgr.bdev_modules, internal.tailq) {
 		if (module->examine_disk) {
 			module->internal.action_in_progress++;
 			module->examine_disk(bdev);
 		}
 	}
-*/
-	SPDK_NOTICELOG("### End of spdk_bdev_start without GPT partition examin\n");
+
+	SPDK_NOTICELOG("[ocssd] End of spdk_bdev_start without GPT partition examin\n");
 }
 
 int

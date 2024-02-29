@@ -240,8 +240,8 @@ ftl_retrieve_punit_chunk_info(struct spdk_ftl_dev *dev, const struct ftl_punit *
 			      struct spdk_ocssd_chunk_information_entry *info)
 {
 	uint32_t i = 0;
-	// ### hjim: take all blocks's bitmap at once
-	//unsigned int num_entries = FTL_BLOCK_SIZE / sizeof(*info);
+	/* [ocssd] take all blocks's bitmap at once
+	unsigned int num_entries = FTL_BLOCK_SIZE / sizeof(*info); */
 	unsigned int num_entries = dev->geo.num_chk;
 	struct ftl_ppa chunk_ppa = punit->start_ppa;
 	char ppa_buf[128];
@@ -1182,7 +1182,7 @@ spdk_ftl_dev_init(const struct spdk_ftl_dev_init_opts *_opts, spdk_ftl_init_fn c
 		}
 	}
 
-	SPDK_NOTICELOG("### Successfully finished FTL dev initialization\n");
+	SPDK_NOTICELOG("[ocssd] Successfully finished FTL dev initialization\n");
 
 	return 0;
 fail_sync:
