@@ -37,6 +37,10 @@
 
 #include "nvme_opal_internal.h"
 
+typedef int (*spdk_opal_cb)(struct spdk_opal_dev *dev, void *ctx);
+
+static int opal_parse_and_check_status(struct spdk_opal_dev *dev, void *data);
+
 static const char *
 opal_error_to_human(int error)
 {
@@ -96,7 +100,7 @@ opal_recv_cmd(struct spdk_opal_dev *dev)
 }
 
 static int
-opal_send_recv(struct spdk_opal_dev *dev, spdk_opal_cb *cb, void *data)
+opal_send_recv(struct spdk_opal_dev *dev, spdk_opal_cb cb, void *data)
 {
 	int ret;
 
@@ -276,6 +280,11 @@ opal_cmd_finalize(struct spdk_opal_dev *dev, uint32_t hsn, uint32_t tsn, bool eo
 	return 0;
 }
 
+/**
+ * synchronous function: send and then receive.
+ *
+ * Wait until response is received. And then call the callback functions.
+ */
 static int
 opal_finalize_and_send(struct spdk_opal_dev *dev, bool eod, spdk_opal_cb cb, void *data)
 {
@@ -549,6 +558,9 @@ static size_t
 opal_response_get_string(const struct spdk_opal_resp_parsed *resp, int n,
 			 const char **store)
 {
+	uint8_t header_len;
+	struct spdk_opal_resp_token token = resp->resp_tokens[n];
+
 	*store = NULL;
 	if (!resp) {
 		SPDK_ERRLOG("Response is NULL\n");
@@ -561,13 +573,28 @@ opal_response_get_string(const struct spdk_opal_resp_parsed *resp, int n,
 		return 0;
 	}
 
-	if (resp->resp_tokens[n].type != OPAL_DTA_TOKENID_BYTESTRING) {
+	if (token.type != OPAL_DTA_TOKENID_BYTESTRING) {
 		SPDK_ERRLOG("Token is not a byte string!\n");
 		return 0;
 	}
 
-	*store = resp->resp_tokens[n].pos + 1;
-	return resp->resp_tokens[n].len - 1;
+	switch (token.width) {
+	case OPAL_WIDTH_SHORT:
+		header_len = 1;
+		break;
+	case OPAL_WIDTH_MEDIUM:
+		header_len = 2;
+		break;
+	case OPAL_WIDTH_LONG:
+		header_len = 4;
+		break;
+	default:
+		SPDK_ERRLOG("Can't get string from this Token\n");
+		return 0;
+	}
+
+	*store = token.pos + header_len;
+	return token.len - header_len;
 }
 
 static int
@@ -864,7 +891,7 @@ opal_discovery0_end(struct spdk_opal_dev *dev)
 			supported = true;
 			break;
 		default:
-			SPDK_NOTICELOG("Unknow feature code: %d\n", feature_code);
+			SPDK_INFOLOG(SPDK_LOG_OPAL, "Unknow feature code: %d\n", feature_code);
 		}
 		cpos += body->tper.length + 4;
 	}
@@ -875,7 +902,7 @@ opal_discovery0_end(struct spdk_opal_dev *dev)
 	}
 
 	if (single_user == false) {
-		SPDK_NOTICELOG("Single User Mode Not Supported\n");
+		SPDK_INFOLOG(SPDK_LOG_OPAL, "Single User Mode Not Supported\n");
 	}
 
 	if (found_com_id == false) {
@@ -954,7 +981,7 @@ spdk_opal_close(struct spdk_opal_dev *dev)
 	pthread_mutex_destroy(&dev->mutex_lock);
 	if (dev->max_ranges > 0) {
 		for (int i = 0; i < dev->max_ranges; i++) {
-			free(dev->locking_range_info[i]);
+			spdk_opal_free_locking_range_info(dev, i);
 		}
 	}
 	free(dev->opal_info);
@@ -1044,7 +1071,6 @@ opal_start_generic_session(struct spdk_opal_dev *dev,
 
 	return opal_finalize_and_send(dev, 1, opal_start_session_cb, NULL);
 }
-
 
 static int
 opal_start_anybody_adminsp_session(struct spdk_opal_dev *dev)
@@ -1586,14 +1612,19 @@ opal_get_locking_range_info(struct spdk_opal_dev *dev,
 		return err;
 	}
 
-	info = calloc(1, sizeof(struct spdk_opal_locking_range_info));
-	if (info == NULL) {
-		SPDK_ERRLOG("Memory allocation failed for spdk_opal_locking_range_info\n");
-		return -ENOMEM;
+	if (dev->locking_range_info[locking_range_id] == NULL) {
+		info = calloc(1, sizeof(struct spdk_opal_locking_range_info));
+		if (info == NULL) {
+			SPDK_ERRLOG("Memory allocation failed for spdk_opal_locking_range_info\n");
+			return -ENOMEM;
+		}
+		info->locking_range_id = locking_range_id;
+		dev->locking_range_info[locking_range_id] = info;
+	} else {
+		info = dev->locking_range_info[locking_range_id];
+		memset(info, 0, sizeof(*info));
+		info->locking_range_id = locking_range_id;
 	}
-
-	info->locking_range_id = locking_range_id;
-	dev->locking_range_info[locking_range_id] = info;
 
 	opal_clear_cmd(dev);
 	opal_set_comid(dev, dev->comid);
@@ -1903,10 +1934,116 @@ opal_revert_tper(struct spdk_opal_dev *dev)
 	opal_add_token_u8(&err, dev, SPDK_OPAL_ENDLIST);
 	if (err) {
 		SPDK_ERRLOG("Error building REVERT TPER command.\n");
+	}
+
+	return err;
+}
+
+static int
+opal_gen_new_active_key(struct spdk_opal_dev *dev)
+{
+	uint8_t uid_data[OPAL_UID_LENGTH] = {0};
+	int err = 0;
+	int length;
+
+	opal_clear_cmd(dev);
+	opal_set_comid(dev, dev->comid);
+
+	if (dev->prev_data == NULL || dev->prev_d_len == 0) {
+		SPDK_ERRLOG("Error finding previous data to generate new active key\n");
+		return -EINVAL;
+	}
+
+	length = spdk_min(dev->prev_d_len, OPAL_UID_LENGTH);
+	memcpy(uid_data, dev->prev_data, length);
+	free(dev->prev_data);
+	dev->prev_data = NULL;
+
+	opal_add_token_u8(&err, dev, SPDK_OPAL_CALL);
+	opal_add_token_bytestring(&err, dev, uid_data, OPAL_UID_LENGTH);
+	opal_add_token_bytestring(&err, dev, spdk_opal_method[GENKEY_METHOD],
+				  OPAL_UID_LENGTH);
+
+	opal_add_tokens(&err, dev, 2, SPDK_OPAL_STARTLIST, SPDK_OPAL_ENDLIST);
+
+	if (err) {
+		SPDK_ERRLOG("Error building new key generation command.\n");
 		return err;
 	}
 
 	return opal_finalize_and_send(dev, 1, opal_parse_and_check_status, NULL);
+}
+
+static int
+opal_get_active_key_cb(struct spdk_opal_dev *dev, void *data)
+{
+	const char *active_key;
+	size_t str_len;
+	int error = 0;
+
+	error = opal_parse_and_check_status(dev, NULL);
+	if (error) {
+		return error;
+	}
+
+	str_len = opal_response_get_string(&dev->parsed_resp, 4, &active_key);
+	if (!active_key) {
+		SPDK_ERRLOG("Couldn't extract active key from response\n");
+		return -EINVAL;
+	}
+
+	dev->prev_d_len = str_len;
+	dev->prev_data = calloc(1, str_len);
+	if (!dev->prev_data) {
+		SPDK_ERRLOG("memory allocation error\n");
+		return -ENOMEM;
+	}
+	memcpy(dev->prev_data, active_key, str_len);
+
+	SPDK_DEBUGLOG(SPDK_LOG_OPAL, "active key = %p\n", dev->prev_data);
+	return 0;
+}
+
+static int
+opal_get_active_key(struct spdk_opal_dev *dev, struct opal_common_session *session)
+{
+	uint8_t uid_locking_range[OPAL_UID_LENGTH];
+	uint8_t locking_range_id;
+	int err = 0;
+
+	opal_clear_cmd(dev);
+	opal_set_comid(dev, dev->comid);
+
+	locking_range_id = session->opal_key->locking_range;
+	err = opal_build_locking_range(uid_locking_range, OPAL_UID_LENGTH, locking_range_id);
+	if (err) {
+		return err;
+	}
+
+	opal_add_token_u8(&err, dev, SPDK_OPAL_CALL);
+	opal_add_token_bytestring(&err, dev, uid_locking_range, OPAL_UID_LENGTH);
+	opal_add_token_bytestring(&err, dev, spdk_opal_method[GET_METHOD],
+				  OPAL_UID_LENGTH);
+	opal_add_tokens(&err, dev, 12,
+			SPDK_OPAL_STARTLIST,
+			SPDK_OPAL_STARTLIST,
+			SPDK_OPAL_STARTNAME,
+			SPDK_OPAL_STARTCOLUMN,
+			SPDK_OPAL_ACTIVEKEY,
+			SPDK_OPAL_ENDNAME,
+			SPDK_OPAL_STARTNAME,
+			SPDK_OPAL_ENDCOLUMN,
+			SPDK_OPAL_ACTIVEKEY,
+			SPDK_OPAL_ENDNAME,
+			SPDK_OPAL_ENDLIST,
+			SPDK_OPAL_ENDLIST);
+
+	if (err) {
+		SPDK_ERRLOG("Error building get active key command.\n");
+		return err;
+	}
+
+	return opal_finalize_and_send(dev, 1, opal_get_active_key_cb, NULL);
 }
 
 int
@@ -1920,7 +2057,8 @@ spdk_opal_cmd_revert_tper(struct spdk_opal_dev *dev, const char *passwd)
 	}
 
 	ret = opal_init_key(&opal_key, passwd, OPAL_LOCKING_RANGE_GLOBAL);
-	if (ret != 0) {
+	if (ret) {
+		SPDK_ERRLOG("Init key failed\n");
 		return ret;
 	}
 
@@ -1941,6 +2079,104 @@ spdk_opal_cmd_revert_tper(struct spdk_opal_dev *dev, const char *passwd)
 		SPDK_ERRLOG("Error on reverting TPer with error %d: %s\n", ret,
 			    opal_error_to_human(ret));
 		goto end;
+	}
+
+	ret = opal_finalize_and_send(dev, 1, opal_parse_and_check_status, NULL);
+	if (ret) {
+		opal_end_session(dev);
+		SPDK_ERRLOG("Error on reverting TPer with error %d: %s\n", ret,
+			    opal_error_to_human(ret));
+	}
+
+	/* Controller will terminate session. No "end session" here needed. */
+
+end:
+	pthread_mutex_unlock(&dev->mutex_lock);
+	return ret;
+}
+
+int
+spdk_opal_revert_poll(struct spdk_opal_dev *dev)
+{
+	void *response = dev->resp;
+	struct spdk_opal_header *header = response;
+	int ret;
+
+	assert(dev->revert_cb_fn);
+
+	ret = spdk_nvme_ctrlr_security_receive(dev->dev_handler, SPDK_SCSI_SECP_TCG, dev->comid,
+					       0, dev->resp, IO_BUFFER_LENGTH);
+	if (ret) {
+		SPDK_ERRLOG("Security Receive Error on dev = %p\n", dev);
+		dev->revert_cb_fn(dev, dev->ctx, ret);
+		return 0;
+	}
+
+	if (header->com_packet.outstanding_data == 0 &&
+	    header->com_packet.min_transfer == 0) {
+		ret = opal_parse_and_check_status(dev, NULL);
+		dev->revert_cb_fn(dev, dev->ctx, ret);
+		return 0;
+	} else {
+		memset(response, 0, IO_BUFFER_LENGTH);
+	}
+
+	return -EAGAIN;
+}
+
+int
+spdk_opal_cmd_revert_tper_async(struct spdk_opal_dev *dev, const char *passwd,
+				spdk_opal_revert_cb cb_fn, void *cb_ctx)
+{
+	int ret;
+	struct spdk_opal_key opal_key;
+
+	if (!dev || dev->supported == false) {
+		return -ENODEV;
+	}
+
+	if (cb_fn == NULL) {
+		SPDK_ERRLOG("No revert callback function specified.\n");
+		return -EFAULT;
+	}
+
+	dev->revert_cb_fn = cb_fn;
+	dev->ctx = cb_ctx;
+
+	ret = opal_init_key(&opal_key, passwd, OPAL_LOCKING_RANGE_GLOBAL);
+	if (ret) {
+		SPDK_ERRLOG("Init key failed\n");
+		return ret;
+	}
+
+	pthread_mutex_lock(&dev->mutex_lock);
+	opal_setup_dev(dev);
+
+	ret = opal_start_adminsp_session(dev, &opal_key);
+	if (ret) {
+		opal_end_session(dev);
+		SPDK_ERRLOG("Error on starting admin SP session with error %d: %s\n", ret,
+			    opal_error_to_human(ret));
+		goto end;
+	}
+
+	ret = opal_revert_tper(dev);
+	if (ret) {
+		opal_end_session(dev);
+		SPDK_ERRLOG("Error on reverting TPer with error %d: %s\n", ret,
+			    opal_error_to_human(ret));
+		goto end;
+	}
+
+	ret = opal_cmd_finalize(dev, dev->hsn, dev->tsn, true);    /* true: end of data */
+	if (ret) {
+		SPDK_ERRLOG("Error finalizing command buffer: %d\n", ret);
+		goto end;
+	}
+
+	ret = opal_send_cmd(dev);
+	if (ret) {
+		SPDK_ERRLOG("Error sending opal command: %d\n", ret);
 	}
 
 	/* Controller will terminate session. No "end session" here needed. */
@@ -2329,6 +2565,56 @@ end:
 	return ret;
 }
 
+int
+spdk_opal_cmd_erase_locking_range(struct spdk_opal_dev *dev, enum spdk_opal_user user_id,
+				  enum spdk_opal_locking_range locking_range_id, const char *password)
+{
+	struct opal_common_session session = {};
+	struct spdk_opal_key opal_key;
+	int ret;
+
+	if (!dev || dev->supported == false) {
+		return -ENODEV;
+	}
+
+	ret = opal_init_key(&opal_key, password, locking_range_id);
+	if (ret != 0) {
+		return ret;
+	}
+
+	session.opal_key = &opal_key;
+	session.who = user_id;
+
+	pthread_mutex_lock(&dev->mutex_lock);
+	ret = opal_start_auth_session(dev, &session);
+	if (ret) {
+		SPDK_ERRLOG("start authenticate session error %d: %s\n", ret, opal_error_to_human(ret));
+		pthread_mutex_unlock(&dev->mutex_lock);
+		return ret;
+	}
+
+	ret = opal_get_active_key(dev, &session);
+	if (ret) {
+		SPDK_ERRLOG("get active key error %d: %s\n", ret, opal_error_to_human(ret));
+		goto end;
+	}
+
+	ret = opal_gen_new_active_key(dev);
+	if (ret) {
+		SPDK_ERRLOG("generate new active key error %d: %s\n", ret, opal_error_to_human(ret));
+		goto end;
+	}
+
+end:
+	ret += opal_end_session(dev);
+	if (ret) {
+		SPDK_ERRLOG("end session error %d: %s\n", ret, opal_error_to_human(ret));
+	}
+
+	pthread_mutex_unlock(&dev->mutex_lock);
+	return ret;
+}
+
 struct spdk_opal_info *
 spdk_opal_get_info(struct spdk_opal_dev *dev)
 {
@@ -2345,6 +2631,15 @@ struct spdk_opal_locking_range_info *
 spdk_opal_get_locking_range_info(struct spdk_opal_dev *dev, enum spdk_opal_locking_range id)
 {
 	return dev->locking_range_info[id];
+}
+
+void
+spdk_opal_free_locking_range_info(struct spdk_opal_dev *dev, enum spdk_opal_locking_range id)
+{
+	struct spdk_opal_locking_range_info *info = dev->locking_range_info[id];
+
+	free(info);
+	dev->locking_range_info[id] = NULL;
 }
 
 uint8_t

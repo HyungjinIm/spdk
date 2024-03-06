@@ -151,6 +151,7 @@ nvme_tcp_req_get(struct nvme_tcp_qpair *tqpair)
 	tcp_req->active_r2ts = 0;
 	tcp_req->iovcnt = 0;
 	memset(&tcp_req->send_pdu, 0, sizeof(tcp_req->send_pdu));
+	tcp_req->send_pdu.hdr = &tcp_req->send_pdu.hdr_mem;
 	TAILQ_INSERT_TAIL(&tqpair->outstanding_reqs, tcp_req, link);
 
 	return tcp_req;
@@ -276,67 +277,7 @@ int
 nvme_tcp_ctrlr_scan(struct spdk_nvme_probe_ctx *probe_ctx,
 		    bool direct_connect)
 {
-	struct spdk_nvme_ctrlr_opts discovery_opts;
-	struct spdk_nvme_ctrlr *discovery_ctrlr;
-	union spdk_nvme_cc_register cc;
-	int rc;
-	struct nvme_completion_poll_status status;
-
-	if (strcmp(probe_ctx->trid.subnqn, SPDK_NVMF_DISCOVERY_NQN) != 0) {
-		/* Not a discovery controller - connect directly. */
-		rc = nvme_ctrlr_probe(&probe_ctx->trid, probe_ctx, NULL);
-		return rc;
-	}
-
-	spdk_nvme_ctrlr_get_default_ctrlr_opts(&discovery_opts, sizeof(discovery_opts));
-	/* For discovery_ctrlr set the timeout to 0 */
-	discovery_opts.keep_alive_timeout_ms = 0;
-
-	discovery_ctrlr = nvme_tcp_ctrlr_construct(&probe_ctx->trid, &discovery_opts, NULL);
-	if (discovery_ctrlr == NULL) {
-		return -1;
-	}
-
-	/* TODO: this should be using the normal NVMe controller initialization process */
-	cc.raw = 0;
-	cc.bits.en = 1;
-	cc.bits.iosqes = 6; /* SQ entry size == 64 == 2^6 */
-	cc.bits.iocqes = 4; /* CQ entry size == 16 == 2^4 */
-	rc = nvme_transport_ctrlr_set_reg_4(discovery_ctrlr, offsetof(struct spdk_nvme_registers, cc.raw),
-					    cc.raw);
-	if (rc < 0) {
-		SPDK_ERRLOG("Failed to set cc\n");
-		nvme_ctrlr_destruct(discovery_ctrlr);
-		return -1;
-	}
-
-	/* Direct attach through spdk_nvme_connect() API */
-	if (direct_connect == true) {
-		/* get the cdata info */
-		status.done = false;
-		rc = nvme_ctrlr_cmd_identify(discovery_ctrlr, SPDK_NVME_IDENTIFY_CTRLR, 0, 0,
-					     &discovery_ctrlr->cdata, sizeof(discovery_ctrlr->cdata),
-					     nvme_completion_poll_cb, &status);
-		if (rc != 0) {
-			SPDK_ERRLOG("Failed to identify cdata\n");
-			return rc;
-		}
-
-		if (spdk_nvme_wait_for_completion(discovery_ctrlr->adminq, &status)) {
-			SPDK_ERRLOG("nvme_identify_controller failed!\n");
-			return -ENXIO;
-		}
-		/* Set the ready state to skip the normal init process */
-		discovery_ctrlr->state = NVME_CTRLR_STATE_READY;
-		nvme_ctrlr_connected(probe_ctx, discovery_ctrlr);
-		nvme_ctrlr_add_process(discovery_ctrlr, 0);
-		return 0;
-	}
-
-	rc = nvme_fabric_ctrlr_discover(discovery_ctrlr, probe_ctx);
-	nvme_ctrlr_destruct(discovery_ctrlr);
-	SPDK_DEBUGLOG(SPDK_LOG_NVME, "leave\n");
-	return rc;
+	return nvme_fabric_ctrlr_scan(probe_ctx, direct_connect);
 }
 
 int
@@ -401,7 +342,7 @@ nvme_tcp_qpair_process_send_queue(struct nvme_tcp_qpair *tqpair)
 	 * Build up a list of iovecs for the first few PDUs in the
 	 *  tqpair 's send_queue.
 	 */
-	while (pdu != NULL && ((array_size - iovcnt) >= 3)) {
+	while (pdu != NULL && ((array_size - iovcnt) >= (2 + (int)pdu->data_iovcnt))) {
 		iovcnt += nvme_tcp_build_iovs(&iovs[iovcnt], array_size - iovcnt,
 					      pdu, tqpair->host_hdgst_enable,
 					      tqpair->host_ddgst_enable, &mapped_length);
@@ -429,7 +370,7 @@ nvme_tcp_qpair_process_send_queue(struct nvme_tcp_qpair *tqpair)
 	 */
 	TAILQ_INIT(&completed_pdus_list);
 	while (bytes > 0) {
-		pdu_length = pdu->hdr.common.plen - pdu->writev_offset;
+		pdu_length = pdu->hdr->common.plen - pdu->writev_offset;
 		assert(pdu_length > 0);
 		if (bytes >= pdu_length) {
 			bytes -= pdu_length;
@@ -464,10 +405,10 @@ nvme_tcp_qpair_write_pdu(struct nvme_tcp_qpair *tqpair,
 	int hlen;
 	uint32_t crc32c;
 
-	hlen = pdu->hdr.common.hlen;
+	hlen = pdu->hdr->common.hlen;
 	enable_digest = 1;
-	if (pdu->hdr.common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_IC_REQ ||
-	    pdu->hdr.common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_H2C_TERM_REQ) {
+	if (pdu->hdr->common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_IC_REQ ||
+	    pdu->hdr->common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_H2C_TERM_REQ) {
 		/* this PDU should be sent without digest */
 		enable_digest = 0;
 	}
@@ -475,7 +416,7 @@ nvme_tcp_qpair_write_pdu(struct nvme_tcp_qpair *tqpair,
 	/* Header Digest */
 	if (enable_digest && tqpair->host_hdgst_enable) {
 		crc32c = nvme_tcp_pdu_calc_header_digest(pdu);
-		MAKE_DIGEST_WORD((uint8_t *)pdu->hdr.raw + hlen, crc32c);
+		MAKE_DIGEST_WORD((uint8_t *)pdu->hdr->raw + hlen, crc32c);
 	}
 
 	/* Data Digest */
@@ -630,7 +571,7 @@ nvme_tcp_qpair_capsule_cmd_send(struct nvme_tcp_qpair *tqpair,
 	SPDK_DEBUGLOG(SPDK_LOG_NVME, "enter\n");
 	pdu = &tcp_req->send_pdu;
 
-	capsule_cmd = &pdu->hdr.capsule_cmd;
+	capsule_cmd = &pdu->hdr->capsule_cmd;
 	capsule_cmd->common.pdu_type = SPDK_NVME_TCP_PDU_TYPE_CAPSULE_CMD;
 	plen = capsule_cmd->common.hlen = sizeof(*capsule_cmd);
 	capsule_cmd->ccsqe = tcp_req->req->cmd;
@@ -689,12 +630,8 @@ nvme_tcp_qpair_submit_request(struct spdk_nvme_qpair *qpair,
 
 	tcp_req = nvme_tcp_req_get(tqpair);
 	if (!tcp_req) {
-		/*
-		 * No tcp_req is available, so queue the request to be
-		 *  processed later.
-		 */
-		STAILQ_INSERT_TAIL(&qpair->queued_req, req, stailq);
-		return 0;
+		/* Inform the upper layer to try again later. */
+		return -EAGAIN;
 	}
 
 	if (nvme_tcp_req_init(tqpair, req, tcp_req)) {
@@ -762,6 +699,7 @@ nvme_tcp_qpair_set_recv_state(struct nvme_tcp_qpair *tqpair,
 	case NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_READY:
 	case NVME_TCP_PDU_RECV_STATE_ERROR:
 		memset(&tqpair->recv_pdu, 0, sizeof(struct nvme_tcp_pdu));
+		tqpair->recv_pdu.hdr = &tqpair->recv_pdu.hdr_mem;
 		break;
 	case NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_CH:
 	case NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_PSH:
@@ -790,7 +728,8 @@ nvme_tcp_qpair_send_h2c_term_req(struct nvme_tcp_qpair *tqpair, struct nvme_tcp_
 
 	rsp_pdu = &tqpair->send_pdu;
 	memset(rsp_pdu, 0, sizeof(*rsp_pdu));
-	h2c_term_req = &rsp_pdu->hdr.term_req;
+	rsp_pdu->hdr = &rsp_pdu->hdr_mem;
+	h2c_term_req = &rsp_pdu->hdr->term_req;
 	h2c_term_req->common.pdu_type = SPDK_NVME_TCP_PDU_TYPE_H2C_TERM_REQ;
 	h2c_term_req->common.hlen = h2c_term_req_hdr_len;
 
@@ -799,14 +738,14 @@ nvme_tcp_qpair_send_h2c_term_req(struct nvme_tcp_qpair *tqpair, struct nvme_tcp_
 		DSET32(&h2c_term_req->fei, error_offset);
 	}
 
-	copy_len = pdu->hdr.common.hlen;
+	copy_len = pdu->hdr->common.hlen;
 	if (copy_len > SPDK_NVME_TCP_TERM_REQ_ERROR_DATA_MAX_SIZE) {
 		copy_len = SPDK_NVME_TCP_TERM_REQ_ERROR_DATA_MAX_SIZE;
 	}
 
 	/* Copy the error info into the buffer */
-	memcpy((uint8_t *)rsp_pdu->hdr.raw + h2c_term_req_hdr_len, pdu->hdr.raw, copy_len);
-	nvme_tcp_pdu_set_data(rsp_pdu, (uint8_t *)rsp_pdu->hdr.raw + h2c_term_req_hdr_len, copy_len);
+	memcpy((uint8_t *)rsp_pdu->hdr->raw + h2c_term_req_hdr_len, pdu->hdr->raw, copy_len);
+	nvme_tcp_pdu_set_data(rsp_pdu, (uint8_t *)rsp_pdu->hdr->raw + h2c_term_req_hdr_len, copy_len);
 
 	/* Contain the header len of the wrong received pdu */
 	h2c_term_req->common.plen = h2c_term_req->common.hlen + copy_len;
@@ -826,15 +765,15 @@ nvme_tcp_pdu_ch_handle(struct nvme_tcp_qpair *tqpair)
 
 	pdu = &tqpair->recv_pdu;
 
-	SPDK_DEBUGLOG(SPDK_LOG_NVME, "pdu type = %d\n", pdu->hdr.common.pdu_type);
-	if (pdu->hdr.common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_IC_RESP) {
+	SPDK_DEBUGLOG(SPDK_LOG_NVME, "pdu type = %d\n", pdu->hdr->common.pdu_type);
+	if (pdu->hdr->common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_IC_RESP) {
 		if (tqpair->state != NVME_TCP_QPAIR_STATE_INVALID) {
 			SPDK_ERRLOG("Already received IC_RESP PDU, and we should reject this pdu=%p\n", pdu);
 			fes = SPDK_NVME_TCP_TERM_REQ_FES_PDU_SEQUENCE_ERROR;
 			goto err;
 		}
 		expected_hlen = sizeof(struct spdk_nvme_tcp_ic_resp);
-		if (pdu->hdr.common.plen != expected_hlen) {
+		if (pdu->hdr->common.plen != expected_hlen) {
 			plen_error = true;
 		}
 	} else {
@@ -844,52 +783,52 @@ nvme_tcp_pdu_ch_handle(struct nvme_tcp_qpair *tqpair)
 			goto err;
 		}
 
-		switch (pdu->hdr.common.pdu_type) {
+		switch (pdu->hdr->common.pdu_type) {
 		case SPDK_NVME_TCP_PDU_TYPE_CAPSULE_RESP:
 			expected_hlen = sizeof(struct spdk_nvme_tcp_rsp);
-			if (pdu->hdr.common.flags & SPDK_NVME_TCP_CH_FLAGS_HDGSTF) {
+			if (pdu->hdr->common.flags & SPDK_NVME_TCP_CH_FLAGS_HDGSTF) {
 				hd_len = SPDK_NVME_TCP_DIGEST_LEN;
 			}
 
-			if (pdu->hdr.common.plen != (expected_hlen + hd_len)) {
+			if (pdu->hdr->common.plen != (expected_hlen + hd_len)) {
 				plen_error = true;
 			}
 			break;
 		case SPDK_NVME_TCP_PDU_TYPE_C2H_DATA:
 			expected_hlen = sizeof(struct spdk_nvme_tcp_c2h_data_hdr);
-			if (pdu->hdr.common.plen < pdu->hdr.common.pdo) {
+			if (pdu->hdr->common.plen < pdu->hdr->common.pdo) {
 				plen_error = true;
 			}
 			break;
 		case SPDK_NVME_TCP_PDU_TYPE_C2H_TERM_REQ:
 			expected_hlen = sizeof(struct spdk_nvme_tcp_term_req_hdr);
-			if ((pdu->hdr.common.plen <= expected_hlen) ||
-			    (pdu->hdr.common.plen > SPDK_NVME_TCP_TERM_REQ_PDU_MAX_SIZE)) {
+			if ((pdu->hdr->common.plen <= expected_hlen) ||
+			    (pdu->hdr->common.plen > SPDK_NVME_TCP_TERM_REQ_PDU_MAX_SIZE)) {
 				plen_error = true;
 			}
 			break;
 		case SPDK_NVME_TCP_PDU_TYPE_R2T:
 			expected_hlen = sizeof(struct spdk_nvme_tcp_r2t_hdr);
-			if (pdu->hdr.common.flags & SPDK_NVME_TCP_CH_FLAGS_HDGSTF) {
+			if (pdu->hdr->common.flags & SPDK_NVME_TCP_CH_FLAGS_HDGSTF) {
 				hd_len = SPDK_NVME_TCP_DIGEST_LEN;
 			}
 
-			if (pdu->hdr.common.plen != (expected_hlen + hd_len)) {
+			if (pdu->hdr->common.plen != (expected_hlen + hd_len)) {
 				plen_error = true;
 			}
 			break;
 
 		default:
-			SPDK_ERRLOG("Unexpected PDU type 0x%02x\n", tqpair->recv_pdu.hdr.common.pdu_type);
+			SPDK_ERRLOG("Unexpected PDU type 0x%02x\n", tqpair->recv_pdu.hdr->common.pdu_type);
 			fes = SPDK_NVME_TCP_TERM_REQ_FES_INVALID_HEADER_FIELD;
 			error_offset = offsetof(struct spdk_nvme_tcp_common_pdu_hdr, pdu_type);
 			goto err;
 		}
 	}
 
-	if (pdu->hdr.common.hlen != expected_hlen) {
+	if (pdu->hdr->common.hlen != expected_hlen) {
 		SPDK_ERRLOG("Expected PDU header length %u, got %u\n",
-			    expected_hlen, pdu->hdr.common.hlen);
+			    expected_hlen, pdu->hdr->common.hlen);
 		fes = SPDK_NVME_TCP_TERM_REQ_FES_INVALID_HEADER_FIELD;
 		error_offset = offsetof(struct spdk_nvme_tcp_common_pdu_hdr, hlen);
 		goto err;
@@ -900,6 +839,7 @@ nvme_tcp_pdu_ch_handle(struct nvme_tcp_qpair *tqpair)
 		goto err;
 	} else {
 		nvme_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_PSH);
+		nvme_tcp_pdu_calc_psh_len(&tqpair->recv_pdu, tqpair->host_hdgst_enable);
 		return;
 	}
 err:
@@ -918,18 +858,6 @@ get_nvme_active_req_by_cid(struct nvme_tcp_qpair *tqpair, uint32_t cid)
 }
 
 static void
-nvme_tcp_free_and_handle_queued_req(struct spdk_nvme_qpair *qpair)
-{
-	struct nvme_request *req;
-
-	if (!STAILQ_EMPTY(&qpair->queued_req) && !qpair->ctrlr->is_resetting) {
-		req = STAILQ_FIRST(&qpair->queued_req);
-		STAILQ_REMOVE_HEAD(&qpair->queued_req, stailq);
-		nvme_qpair_submit_request(qpair, req);
-	}
-}
-
-static void
 nvme_tcp_c2h_data_payload_handle(struct nvme_tcp_qpair *tqpair,
 				 struct nvme_tcp_pdu *pdu, uint32_t *reaped)
 {
@@ -942,7 +870,7 @@ nvme_tcp_c2h_data_payload_handle(struct nvme_tcp_qpair *tqpair,
 	assert(tcp_req != NULL);
 
 	SPDK_DEBUGLOG(SPDK_LOG_NVME, "enter\n");
-	c2h_data = &pdu->hdr.c2h_data;
+	c2h_data = &pdu->hdr->c2h_data;
 	tcp_req->datao += pdu->data_len;
 	flags = c2h_data->common.flags;
 
@@ -959,7 +887,6 @@ nvme_tcp_c2h_data_payload_handle(struct nvme_tcp_qpair *tqpair,
 		nvme_tcp_req_complete(tcp_req->req, &cpl);
 		nvme_tcp_req_put(tqpair, tcp_req);
 		(*reaped)++;
-		nvme_tcp_free_and_handle_queued_req(&tqpair->qpair);
 	}
 }
 
@@ -989,7 +916,7 @@ static void
 nvme_tcp_c2h_term_req_payload_handle(struct nvme_tcp_qpair *tqpair,
 				     struct nvme_tcp_pdu *pdu)
 {
-	nvme_tcp_c2h_term_req_dump(&pdu->hdr.term_req);
+	nvme_tcp_c2h_term_req_dump(&pdu->hdr->term_req);
 	nvme_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_ERROR);
 }
 
@@ -1019,7 +946,7 @@ nvme_tcp_pdu_payload_handle(struct nvme_tcp_qpair *tqpair,
 		}
 	}
 
-	switch (pdu->hdr.common.pdu_type) {
+	switch (pdu->hdr->common.pdu_type) {
 	case SPDK_NVME_TCP_PDU_TYPE_C2H_DATA:
 		nvme_tcp_c2h_data_payload_handle(tqpair, pdu, reaped);
 		break;
@@ -1046,7 +973,7 @@ static void
 nvme_tcp_icresp_handle(struct nvme_tcp_qpair *tqpair,
 		       struct nvme_tcp_pdu *pdu)
 {
-	struct spdk_nvme_tcp_ic_resp *ic_resp = &pdu->hdr.ic_resp;
+	struct spdk_nvme_tcp_ic_resp *ic_resp = &pdu->hdr->ic_resp;
 	uint32_t error_offset = 0;
 	enum spdk_nvme_tcp_term_req_fes fes;
 
@@ -1093,7 +1020,7 @@ nvme_tcp_capsule_resp_hdr_handle(struct nvme_tcp_qpair *tqpair, struct nvme_tcp_
 				 uint32_t *reaped)
 {
 	struct nvme_tcp_req *tcp_req;
-	struct spdk_nvme_tcp_rsp *capsule_resp = &pdu->hdr.capsule_resp;
+	struct spdk_nvme_tcp_rsp *capsule_resp = &pdu->hdr->capsule_resp;
 	uint32_t cid, error_offset = 0;
 	enum spdk_nvme_tcp_term_req_fes fes;
 	struct spdk_nvme_cpl cpl;
@@ -1119,7 +1046,6 @@ nvme_tcp_capsule_resp_hdr_handle(struct nvme_tcp_qpair *tqpair, struct nvme_tcp_
 	nvme_tcp_req_complete(tcp_req->req, &cpl);
 	nvme_tcp_req_put(tqpair, tcp_req);
 	(*reaped)++;
-	nvme_tcp_free_and_handle_queued_req(&tqpair->qpair);
 
 	SPDK_DEBUGLOG(SPDK_LOG_NVME, "complete tcp_req(%p) on tqpair=%p\n", tcp_req, tqpair);
 
@@ -1134,7 +1060,7 @@ static void
 nvme_tcp_c2h_term_req_hdr_handle(struct nvme_tcp_qpair *tqpair,
 				 struct nvme_tcp_pdu *pdu)
 {
-	struct spdk_nvme_tcp_term_req_hdr *c2h_term_req = &pdu->hdr.term_req;
+	struct spdk_nvme_tcp_term_req_hdr *c2h_term_req = &pdu->hdr->term_req;
 	uint32_t error_offset = 0;
 	enum spdk_nvme_tcp_term_req_fes fes;
 
@@ -1146,7 +1072,7 @@ nvme_tcp_c2h_term_req_hdr_handle(struct nvme_tcp_qpair *tqpair,
 	}
 
 	/* set the data buffer */
-	nvme_tcp_pdu_set_data(pdu, (uint8_t *)pdu->hdr.raw + c2h_term_req->common.hlen,
+	nvme_tcp_pdu_set_data(pdu, (uint8_t *)pdu->hdr->raw + c2h_term_req->common.hlen,
 			      c2h_term_req->common.plen - c2h_term_req->common.hlen);
 	nvme_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_PAYLOAD);
 	return;
@@ -1159,7 +1085,7 @@ static void
 nvme_tcp_c2h_data_hdr_handle(struct nvme_tcp_qpair *tqpair, struct nvme_tcp_pdu *pdu)
 {
 	struct nvme_tcp_req *tcp_req;
-	struct spdk_nvme_tcp_c2h_data_hdr *c2h_data = &pdu->hdr.c2h_data;
+	struct spdk_nvme_tcp_c2h_data_hdr *c2h_data = &pdu->hdr->c2h_data;
 	uint32_t error_offset = 0;
 	enum spdk_nvme_tcp_term_req_fes fes;
 
@@ -1240,7 +1166,8 @@ spdk_nvme_tcp_send_h2c_data(struct nvme_tcp_req *tcp_req)
 
 	rsp_pdu = &tcp_req->send_pdu;
 	memset(rsp_pdu, 0, sizeof(*rsp_pdu));
-	h2c_data = &rsp_pdu->hdr.h2c_data;
+	rsp_pdu->hdr = &rsp_pdu->hdr_mem;
+	h2c_data = &rsp_pdu->hdr->h2c_data;
 
 	h2c_data->common.pdu_type = SPDK_NVME_TCP_PDU_TYPE_H2C_DATA;
 	plen = h2c_data->common.hlen = sizeof(*h2c_data);
@@ -1291,7 +1218,7 @@ static void
 nvme_tcp_r2t_hdr_handle(struct nvme_tcp_qpair *tqpair, struct nvme_tcp_pdu *pdu)
 {
 	struct nvme_tcp_req *tcp_req;
-	struct spdk_nvme_tcp_r2t_hdr *r2t = &pdu->hdr.r2t;
+	struct spdk_nvme_tcp_r2t_hdr *r2t = &pdu->hdr->r2t;
 	uint32_t cid, error_offset = 0;
 	enum spdk_nvme_tcp_term_req_fes fes;
 
@@ -1360,11 +1287,11 @@ nvme_tcp_pdu_psh_handle(struct nvme_tcp_qpair *tqpair, uint32_t *reaped)
 	assert(tqpair->recv_state == NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_PSH);
 	pdu = &tqpair->recv_pdu;
 
-	SPDK_DEBUGLOG(SPDK_LOG_NVME, "enter: pdu type =%u\n", pdu->hdr.common.pdu_type);
+	SPDK_DEBUGLOG(SPDK_LOG_NVME, "enter: pdu type =%u\n", pdu->hdr->common.pdu_type);
 	/* check header digest if needed */
 	if (pdu->has_hdgst) {
 		crc32c = nvme_tcp_pdu_calc_header_digest(pdu);
-		rc = MATCH_DIGEST_WORD((uint8_t *)pdu->hdr.raw + pdu->hdr.common.hlen, crc32c);
+		rc = MATCH_DIGEST_WORD((uint8_t *)pdu->hdr->raw + pdu->hdr->common.hlen, crc32c);
 		if (rc == 0) {
 			SPDK_ERRLOG("header digest error on tqpair=(%p) with pdu=%p\n", tqpair, pdu);
 			fes = SPDK_NVME_TCP_TERM_REQ_FES_HDGST_ERROR;
@@ -1374,7 +1301,7 @@ nvme_tcp_pdu_psh_handle(struct nvme_tcp_qpair *tqpair, uint32_t *reaped)
 		}
 	}
 
-	switch (pdu->hdr.common.pdu_type) {
+	switch (pdu->hdr->common.pdu_type) {
 	case SPDK_NVME_TCP_PDU_TYPE_IC_RESP:
 		nvme_tcp_icresp_handle(tqpair, pdu);
 		break;
@@ -1393,7 +1320,7 @@ nvme_tcp_pdu_psh_handle(struct nvme_tcp_qpair *tqpair, uint32_t *reaped)
 		break;
 
 	default:
-		SPDK_ERRLOG("Unexpected PDU type 0x%02x\n", tqpair->recv_pdu.hdr.common.pdu_type);
+		SPDK_ERRLOG("Unexpected PDU type 0x%02x\n", tqpair->recv_pdu.hdr->common.pdu_type);
 		fes = SPDK_NVME_TCP_TERM_REQ_FES_INVALID_HEADER_FIELD;
 		error_offset = 1;
 		nvme_tcp_qpair_send_h2c_term_req(tqpair, pdu, fes, error_offset);
@@ -1408,8 +1335,6 @@ nvme_tcp_read_pdu(struct nvme_tcp_qpair *tqpair, uint32_t *reaped)
 	int rc = 0;
 	struct nvme_tcp_pdu *pdu;
 	uint32_t data_len;
-	uint8_t psh_len, pdo;
-	int8_t padding_len;
 	enum nvme_tcp_pdu_recv_state prev_state;
 
 	/* The loop here is to allow for several back-to-back state changes. */
@@ -1426,7 +1351,7 @@ nvme_tcp_read_pdu(struct nvme_tcp_qpair *tqpair, uint32_t *reaped)
 			if (pdu->ch_valid_bytes < sizeof(struct spdk_nvme_tcp_common_pdu_hdr)) {
 				rc = nvme_tcp_read_data(tqpair->sock,
 							sizeof(struct spdk_nvme_tcp_common_pdu_hdr) - pdu->ch_valid_bytes,
-							(uint8_t *)&pdu->hdr.common + pdu->ch_valid_bytes);
+							(uint8_t *)&pdu->hdr->common + pdu->ch_valid_bytes);
 				if (rc < 0) {
 					nvme_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_ERROR);
 					break;
@@ -1443,41 +1368,17 @@ nvme_tcp_read_pdu(struct nvme_tcp_qpair *tqpair, uint32_t *reaped)
 		/* Wait for the pdu specific header  */
 		case NVME_TCP_PDU_RECV_STATE_AWAIT_PDU_PSH:
 			pdu = &tqpair->recv_pdu;
-			psh_len = pdu->hdr.common.hlen;
-
-			/* The following pdus can have digest  */
-			if (((pdu->hdr.common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_CAPSULE_RESP) ||
-			     (pdu->hdr.common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_C2H_DATA) ||
-			     (pdu->hdr.common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_R2T)) &&
-			    tqpair->host_hdgst_enable) {
-				pdu->has_hdgst = true;
-				psh_len += SPDK_NVME_TCP_DIGEST_LEN;
-				if (pdu->hdr.common.plen > psh_len) {
-					pdo = pdu->hdr.common.pdo;
-					padding_len = pdo - psh_len;
-					SPDK_DEBUGLOG(SPDK_LOG_NVME, "padding length is =%d for pdu=%p on tqpair=%p\n", padding_len,
-						      pdu, tqpair);
-					if (padding_len > 0) {
-						psh_len = pdo;
-					}
-				}
+			rc = nvme_tcp_read_data(tqpair->sock,
+						pdu->psh_len - pdu->psh_valid_bytes,
+						(uint8_t *)&pdu->hdr->raw + sizeof(struct spdk_nvme_tcp_common_pdu_hdr) + pdu->psh_valid_bytes);
+			if (rc < 0) {
+				nvme_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_ERROR);
+				break;
 			}
 
-			psh_len -= sizeof(struct spdk_nvme_tcp_common_pdu_hdr);
-			/* The following will read psh + hdgest (if possbile) + padding (if posssible) */
-			if (pdu->psh_valid_bytes < psh_len) {
-				rc = nvme_tcp_read_data(tqpair->sock,
-							psh_len - pdu->psh_valid_bytes,
-							(uint8_t *)&pdu->hdr.raw + sizeof(struct spdk_nvme_tcp_common_pdu_hdr) + pdu->psh_valid_bytes);
-				if (rc < 0) {
-					nvme_tcp_qpair_set_recv_state(tqpair, NVME_TCP_PDU_RECV_STATE_ERROR);
-					break;
-				}
-
-				pdu->psh_valid_bytes += rc;
-				if (pdu->psh_valid_bytes < psh_len) {
-					return NVME_TCP_PDU_IN_PROGRESS;
-				}
+			pdu->psh_valid_bytes += rc;
+			if (pdu->psh_valid_bytes < pdu->psh_len) {
+				return NVME_TCP_PDU_IN_PROGRESS;
 			}
 
 			/* All header(ch, psh, head digist) of this PDU has now been read from the socket. */
@@ -1492,7 +1393,7 @@ nvme_tcp_read_pdu(struct nvme_tcp_qpair *tqpair, uint32_t *reaped)
 
 			data_len = pdu->data_len;
 			/* data digest */
-			if (spdk_unlikely((pdu->hdr.common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_C2H_DATA) &&
+			if (spdk_unlikely((pdu->hdr->common.pdu_type == SPDK_NVME_TCP_PDU_TYPE_C2H_DATA) &&
 					  tqpair->host_ddgst_enable)) {
 				data_len += SPDK_NVME_TCP_DIGEST_LEN;
 				pdu->ddgst_enable = true;
@@ -1612,7 +1513,8 @@ nvme_tcp_qpair_icreq_send(struct nvme_tcp_qpair *tqpair)
 
 	pdu = &tqpair->send_pdu;
 	memset(&tqpair->send_pdu, 0, sizeof(tqpair->send_pdu));
-	ic_req = &pdu->hdr.ic_req;
+	pdu->hdr = &pdu->hdr_mem;
+	ic_req = &pdu->hdr->ic_req;
 
 	ic_req->common.pdu_type = SPDK_NVME_TCP_PDU_TYPE_IC_REQ;
 	ic_req->common.hlen = ic_req->common.plen = sizeof(*ic_req);
@@ -1747,6 +1649,7 @@ nvme_tcp_ctrlr_create_qpair(struct spdk_nvme_ctrlr *ctrlr,
 
 	tqpair->num_entries = qsize;
 	qpair = &tqpair->qpair;
+	tqpair->recv_pdu.hdr = &tqpair->recv_pdu.hdr_mem;
 
 	rc = nvme_qpair_init(qpair, qid, ctrlr, qprio, num_requests);
 	if (rc != 0) {
@@ -1760,7 +1663,7 @@ nvme_tcp_ctrlr_create_qpair(struct spdk_nvme_ctrlr *ctrlr,
 		return NULL;
 	}
 
-	rc = nvme_tcp_qpair_connect(tqpair);
+	rc = nvme_transport_ctrlr_connect_qpair(ctrlr, qpair);
 	if (rc < 0) {
 		nvme_tcp_qpair_destroy(qpair);
 		return NULL;

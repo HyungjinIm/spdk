@@ -13,7 +13,7 @@ function usage()
 		options="[config|reset|help]"
 	fi
 
-	[[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+	[[ -n $2 ]] && ( echo "$2"; echo ""; )
 	echo "Helper script for allocating hugepages and binding NVMe, I/OAT, VMD and Virtio devices"
 	echo "to a generic VFIO kernel driver. If VFIO is not available on the system, this script"
 	echo "will fall back to UIO. NVMe and Virtio devices with active mountpoints will be ignored."
@@ -82,7 +82,7 @@ function pci_dev_echo() {
 	local vendor="$(cat /sys/bus/pci/devices/$bdf/vendor)"
 	local device="$(cat /sys/bus/pci/devices/$bdf/device)"
 	shift
-	echo "$bdf (${vendor#0x} ${device#0x}): $@"
+	echo "$bdf (${vendor#0x} ${device#0x}): $*"
 }
 
 function linux_bind_driver() {
@@ -233,7 +233,8 @@ function configure_linux_pci {
 	grep "PCI_DEVICE_ID_INTEL_IOAT" $rootdir/include/spdk/pci_ids.h \
 	| awk -F"x" '{print $2}' > $TMP
 
-	for dev_id in $(cat $TMP); do
+	while IFS= read -r dev_id
+	do
 		for bdf in $(iter_all_pci_dev_id 8086 $dev_id); do
 			if ! pci_can_use $bdf; then
 				pci_dev_echo "$bdf" "Skipping un-whitelisted I/OAT device"
@@ -242,7 +243,7 @@ function configure_linux_pci {
 
 			linux_bind_driver "$bdf" "$driver_name"
 		done
-	done
+	done < $TMP
 	rm $TMP
 
 	# virtio
@@ -251,13 +252,14 @@ function configure_linux_pci {
 	grep "PCI_DEVICE_ID_VIRTIO" $rootdir/include/spdk/pci_ids.h \
 	| awk -F"x" '{print $2}' > $TMP
 
-	for dev_id in $(cat $TMP); do
+	while IFS= read -r dev_id
+	do
 		for bdf in $(iter_all_pci_dev_id 1af4 $dev_id); do
 			if ! pci_can_use $bdf; then
 				pci_dev_echo "$bdf" "Skipping un-whitelisted Virtio device at $bdf"
 				continue
 			fi
-			blknames=''
+			blknames=()
 			get_virtio_names_from_bdf "$bdf" blknames
 			for blkname in $blknames; do
 				if [ "$(lsblk /dev/$blkname --output MOUNTPOINT -n | wc -w)" != "0" ]; then
@@ -268,7 +270,7 @@ function configure_linux_pci {
 
 			linux_bind_driver "$bdf" "$driver_name"
 		done
-	done
+	done < $TMP
 	rm $TMP
 
 	# VMD
@@ -277,7 +279,8 @@ function configure_linux_pci {
 	grep "PCI_DEVICE_ID_INTEL_VMD" $rootdir/include/spdk/pci_ids.h \
 	| awk -F"x" '{print $2}' > $TMP
 
-	for dev_id in $(cat $TMP); do
+	while IFS= read -r dev_id
+	do
 		for bdf in $(iter_pci_dev_id 8086 $dev_id); do
 			if [[ -z "$PCI_WHITELIST" ]] || ! pci_can_use $bdf; then
 				echo "Skipping un-whitelisted VMD device at $bdf"
@@ -287,7 +290,7 @@ function configure_linux_pci {
 			linux_bind_driver "$bdf" "$driver_name"
                         echo " VMD generic kdrv: " "$bdf" "$driver_name"
 		done
-	done
+	done < $TMP
 	rm $TMP
 
 	echo "1" > "/sys/bus/pci/rescan"
@@ -307,7 +310,8 @@ function cleanup_linux {
 	done
 	shopt -u extglob nullglob
 
-	files_to_clean+="$(ls -1 /dev/shm/* | grep -E '(spdk_tgt|iscsi|vhost|nvmf|rocksdb|bdevio|bdevperf)_trace|spdk_iscsi_conns' || true) "
+	files_to_clean+="$(ls -1 /dev/shm/* | \
+	grep -E '(spdk_tgt|iscsi|vhost|nvmf|rocksdb|bdevio|bdevperf|vhost_fuzz|nvme_fuzz)_trace|spdk_iscsi_conns' || true) "
 	files_to_clean="$(readlink -e assert_not_empty $files_to_clean || true)"
 	if [[ -z "$files_to_clean" ]]; then
 		echo "Clean"
@@ -401,6 +405,13 @@ function configure_linux {
 			fi
 		fi
 	fi
+
+	if [ ! -f /dev/cpu/0/msr ]; then
+		# Some distros build msr as a module.  Make sure it's loaded to ensure
+		#  DPDK can easily figure out the TSC rate rather than relying on 100ms
+		#  sleeps.
+		modprobe msr || true
+	fi
 }
 
 function reset_linux_pci {
@@ -431,7 +442,8 @@ function reset_linux_pci {
 	check_for_driver ioatdma
 	driver_loaded=$?
 	set -e
-	for dev_id in $(cat $TMP); do
+	while IFS= read -r dev_id
+	do
 		for bdf in $(iter_all_pci_dev_id 8086 $dev_id); do
 			if ! pci_can_use $bdf; then
 				pci_dev_echo "$bdf" "Skipping un-whitelisted I/OAT device"
@@ -443,7 +455,7 @@ function reset_linux_pci {
 				linux_unbind_driver "$bdf"
 			fi
 		done
-	done
+	done < $TMP
 	rm $TMP
 
 	# virtio
@@ -457,7 +469,8 @@ function reset_linux_pci {
 	#  virtio-pci but just virtio_scsi instead.  Also need to make sure we get the
 	#  underscore vs. dash right in the virtio_scsi name.
 	modprobe virtio-pci || true
-	for dev_id in $(cat $TMP); do
+	while IFS= read -r dev_id
+	do
 		for bdf in $(iter_all_pci_dev_id 1af4 $dev_id); do
 			if ! pci_can_use $bdf; then
 				pci_dev_echo "$bdf" "Skipping un-whitelisted Virtio device at"
@@ -465,7 +478,7 @@ function reset_linux_pci {
 			fi
 			linux_bind_driver "$bdf" virtio-pci
 		done
-	done
+	done < $TMP
 	rm $TMP
 
 	# VMD
@@ -478,7 +491,8 @@ function reset_linux_pci {
 	check_for_driver vmd
 	driver_loaded=$?
 	set -e
-	for dev_id in $(cat $TMP); do
+	while IFS= read -r dev_id
+	do
 		for bdf in $(iter_pci_dev_id 8086 $dev_id); do
 			if ! pci_can_use $bdf; then
 				echo "Skipping un-whitelisted VMD device at $bdf"
@@ -490,7 +504,7 @@ function reset_linux_pci {
 				linux_unbind_driver "$bdf"
 			fi
 		done
-	done
+	done < $TMP
 	rm $TMP
 
 	echo "1" > "/sys/bus/pci/rescan"
@@ -547,7 +561,7 @@ function status_linux {
 		fi
 		device=$(cat /sys/bus/pci/devices/$bdf/device)
 		vendor=$(cat /sys/bus/pci/devices/$bdf/vendor)
-		if [ "$driver" = "nvme" -a -d /sys/bus/pci/devices/$bdf/nvme ]; then
+		if [ "$driver" = "nvme" ] && [ -d /sys/bus/pci/devices/$bdf/nvme ]; then
 			name="\t"$(ls /sys/bus/pci/devices/$bdf/nvme);
 		else
 			name="-";
@@ -593,7 +607,7 @@ function status_linux {
 			fi
 			device=$(cat /sys/bus/pci/devices/$bdf/device)
 			vendor=$(cat /sys/bus/pci/devices/$bdf/vendor)
-			blknames=''
+			blknames=()
 			get_virtio_names_from_bdf "$bdf" blknames
 			echo -e "$bdf\t${vendor#0x}\t${device#0x}\t$node\t\t${driver:--}\t\t$blknames"
 		done
@@ -623,16 +637,18 @@ function configure_freebsd_pci {
 	# IOAT
 	grep "PCI_DEVICE_ID_INTEL_IOAT" $rootdir/include/spdk/pci_ids.h \
 	| awk -F"x" '{print $2}' > $TMP
-	for dev_id in $(cat $TMP); do
+	while IFS= read -r dev_id
+	do
 		GREP_STR="${GREP_STR}\|chip=0x${dev_id}8086"
-	done
+	done < $TMP
 
 	# VMD
 	grep "PCI_DEVICE_ID_INTEL_VMD" $rootdir/include/spdk/pci_ids.h \
 	| awk -F"x" '{print $2}' > $TMP
-	for dev_id in $(cat $TMP); do
+	while IFS= read -r dev_id
+	do
 		GREP_STR="${GREP_STR}\|chip=0x${dev_id}8086"
-	done
+	done < $TMP
 
 	AWK_PROG="{if (count > 0) printf \",\"; printf \"%s:%s:%s\",\$2,\$3,\$4; count++}"
 	echo $AWK_PROG > $TMP

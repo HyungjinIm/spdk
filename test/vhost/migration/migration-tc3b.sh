@@ -16,8 +16,8 @@ function host_2_cleanup_vhost()
 	vm_kill $target_vm
 
 	notice "Removing bdev & controller from vhost 1 on remote server"
-	$rpc delete_nvme_controller Nvme0
-	$rpc remove_vhost_controller $target_vm_ctrl
+	$rpc bdev_nvme_detach_controller Nvme0
+	$rpc vhost_delete_controller $target_vm_ctrl
 
 	notice "Shutting down vhost app"
 	vhost_kill 1
@@ -33,14 +33,14 @@ function host_2_start_vhost()
 
 	notice "Starting vhost 1 instance on remote server"
 	trap 'host_2_cleanup_vhost; error_exit "${FUNCNAME}" "${LINENO}"' INT ERR EXIT
-	vhost_run --vhost-num=1 --no-pci
+	vhost_run 1 "-u"
 
-	$rpc construct_nvme_bdev -b Nvme0 -t rdma -f ipv4 -a $RDMA_TARGET_IP -s 4420 -n "nqn.2018-02.io.spdk:cnode1"
-	$rpc construct_vhost_scsi_controller $target_vm_ctrl
-	$rpc add_vhost_scsi_lun $target_vm_ctrl 0 Nvme0n1
+	$rpc bdev_nvme_attach_controller -b Nvme0 -t rdma -f ipv4 -a $RDMA_TARGET_IP -s 4420 -n "nqn.2018-02.io.spdk:cnode1"
+	$rpc vhost_create_scsi_controller $target_vm_ctrl
+	$rpc vhost_scsi_controller_add_target $target_vm_ctrl 0 Nvme0n1
 
 	vm_setup --os="$os_image" --force=$target_vm --disk-type=spdk_vhost_scsi --disks=VhostScsi0 \
-		--memory=512 --vhost-num=1 --incoming=$incoming_vm
+		--memory=512 --vhost-name=1 --incoming=$incoming_vm
 	vm_run $target_vm
 	sleep 1
 

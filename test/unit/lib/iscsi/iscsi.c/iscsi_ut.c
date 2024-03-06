@@ -157,14 +157,13 @@ op_login_check_target_test(void)
 static void
 op_login_session_normal_test(void)
 {
-	struct spdk_iscsi_conn conn;
+	struct spdk_iscsi_conn conn = {};
 	struct spdk_iscsi_portal portal;
 	struct spdk_iscsi_portal_grp group;
 	struct spdk_iscsi_pdu rsp_pdu = {};
 	struct iscsi_bhs_login_rsp *rsph;
 	struct spdk_iscsi_sess sess;
 	struct iscsi_param param;
-	struct spdk_iscsi_tgt_node *target;
 	int rc;
 
 	/* setup related data structures */
@@ -179,7 +178,7 @@ op_login_session_normal_test(void)
 
 	/* expect failure: NULL params for target name */
 	rc = iscsi_op_login_session_normal(&conn, &rsp_pdu, UT_INITIATOR_NAME1,
-					   NULL, &target, 0);
+					   NULL, 0);
 	CU_ASSERT(rc != 0);
 	CU_ASSERT(rsph->status_class == ISCSI_CLASS_INITIATOR_ERROR);
 	CU_ASSERT(rsph->status_detail == ISCSI_LOGIN_MISSING_PARMS);
@@ -187,7 +186,7 @@ op_login_session_normal_test(void)
 	/* expect failure: incorrect key for target name */
 	param.next = NULL;
 	rc = iscsi_op_login_session_normal(&conn, &rsp_pdu, UT_INITIATOR_NAME1,
-					   &param, &target, 0);
+					   &param, 0);
 	CU_ASSERT(rc != 0);
 	CU_ASSERT(rsph->status_class == ISCSI_CLASS_INITIATOR_ERROR);
 	CU_ASSERT(rsph->status_detail == ISCSI_LOGIN_MISSING_PARMS);
@@ -196,7 +195,7 @@ op_login_session_normal_test(void)
 	param.key = "TargetName";
 	param.val = NULL;
 	rc = iscsi_op_login_session_normal(&conn, &rsp_pdu, UT_INITIATOR_NAME1,
-					   &param, &target, 0);
+					   &param, 0);
 	CU_ASSERT(rc != 0);
 	CU_ASSERT(rsph->status_class == ISCSI_CLASS_INITIATOR_ERROR);
 	CU_ASSERT(rsph->status_detail == ISCSI_LOGIN_MISSING_PARMS);
@@ -208,7 +207,7 @@ op_login_session_normal_test(void)
 		 "%s", UT_INITIATOR_NAME1);
 	rsph->tsih = 1; /* to append the session */
 	rc = iscsi_op_login_session_normal(&conn, &rsp_pdu, UT_INITIATOR_NAME1,
-					   &param, &target, 0);
+					   &param, 0);
 	CU_ASSERT(conn.target_port == NULL);
 	CU_ASSERT(rc != 0);
 	CU_ASSERT(rsph->status_class == ISCSI_CLASS_INITIATOR_ERROR);
@@ -222,7 +221,7 @@ op_login_session_normal_test(void)
 	rsph->tsih = UT_ISCSI_TSIH >> 8; /* to append the session */
 	sess.tag = 1;
 	rc = iscsi_op_login_session_normal(&conn, &rsp_pdu, UT_INITIATOR_NAME1,
-					   &param, &target, 0);
+					   &param, 0);
 	CU_ASSERT(conn.target_port == NULL);
 	CU_ASSERT(rc != 0);
 	CU_ASSERT(rsph->status_class == ISCSI_CLASS_INITIATOR_ERROR);
@@ -232,14 +231,14 @@ op_login_session_normal_test(void)
 	rsph->tsih = 0; /* to create the session */
 	g_spdk_iscsi.AllowDuplicateIsid = false;
 	rc = iscsi_op_login_session_normal(&conn, &rsp_pdu, UT_INITIATOR_NAME1,
-					   &param, &target, 0);
+					   &param, 0);
 	CU_ASSERT(rc == 0);
 
 	/* expect suceess: create the session */
 	rsph->tsih = 0; /* to create the session */
 	g_spdk_iscsi.AllowDuplicateIsid = true;
 	rc = iscsi_op_login_session_normal(&conn, &rsp_pdu, UT_INITIATOR_NAME1,
-					   &param, &target, 0);
+					   &param, 0);
 	CU_ASSERT(rc == 0);
 
 	free(g_spdk_iscsi.session);
@@ -296,7 +295,10 @@ maxburstlength_test(void)
 	req->write_bit = 1;
 	req->final_bit = 1;
 
-	rc = spdk_iscsi_execute(&conn, req_pdu);
+	rc = iscsi_pdu_hdr_handle(&conn, req_pdu);
+	if (rc == 0 && !req_pdu->is_rejected) {
+		rc = iscsi_pdu_payload_handle(&conn, req_pdu);
+	}
 	CU_ASSERT(rc == 0);
 
 	response_pdu = TAILQ_FIRST(&g_write_pdu_list);
@@ -321,7 +323,10 @@ maxburstlength_test(void)
 	data_out->ttt = r2t->ttt;
 	DSET24(data_out->data_segment_len, 1028);
 
-	rc = spdk_iscsi_execute(&conn, data_out_pdu);
+	rc = iscsi_pdu_hdr_handle(&conn, data_out_pdu);
+	if (rc == 0 && !data_out_pdu->is_rejected) {
+		rc = iscsi_pdu_payload_handle(&conn, data_out_pdu);
+	}
 	CU_ASSERT(rc == SPDK_ISCSI_CONNECTION_FATAL);
 
 	SPDK_CU_ASSERT_FATAL(response_pdu->task != NULL);

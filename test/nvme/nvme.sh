@@ -5,27 +5,6 @@ rootdir=$(readlink -f $testdir/../..)
 source $rootdir/scripts/common.sh
 source $rootdir/test/common/autotest_common.sh
 
-function get_nvme_name_from_bdf {
-	blkname=()
-
-	nvme_devs=$(lsblk -d --output NAME | grep "^nvme") || true
-	if [ -z "$nvme_devs" ]; then
-		return
-	fi
-	for dev in $nvme_devs; do
-		link_name=$(readlink /sys/block/$dev/device/device) || true
-		if [ -z "$link_name" ]; then
-			link_name=$(readlink /sys/block/$dev/device)
-		fi
-		bdf=$(basename "$link_name")
-		if [ "$bdf" = "$1" ]; then
-			blkname+=($dev)
-		fi
-	done
-
-	printf '%s\n' "${blkname[@]}"
-}
-
 timing_enter nvme
 
 if [ $(uname) = Linux ]; then
@@ -104,7 +83,14 @@ done
 timing_exit identify
 
 timing_enter perf
-$rootdir/examples/nvme/perf/perf -q 128 -w read -o 12288 -t 1 -LL -i 0
+#enable no shutdown notification option
+$rootdir/examples/nvme/perf/perf -q 128 -w read -o 12288 -t 1 -LL -i 0 -N
+$rootdir/examples/nvme/perf/perf -q 128 -w write -o 12288 -t 1 -LL -i 0
+if [ -b /dev/ram0 ]; then
+	# Test perf with AIO device
+	$rootdir/examples/nvme/perf/perf /dev/ram0 -q 128 -w read -o 12288 -t 1 -LL -i 0
+	report_test_completion "nvme_perf"
+fi
 timing_exit perf
 
 timing_enter reserve
@@ -130,6 +116,10 @@ timing_exit e2edp
 timing_enter err_injection
 $testdir/err_injection/err_injection
 timing_exit err_injection
+
+timing_enter startup
+$testdir/startup/startup -t 1000000
+timing_exit startup
 
 timing_enter overhead
 $testdir/overhead/overhead -s 4096 -t 1 -H

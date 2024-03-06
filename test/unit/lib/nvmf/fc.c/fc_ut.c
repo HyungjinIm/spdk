@@ -81,7 +81,6 @@ const struct spdk_nvmf_transport_ops spdk_nvmf_transport_rdma = {
 	.req_complete = NULL,
 
 	.qpair_fini = NULL,
-	.qpair_is_idle = NULL,
 	.qpair_get_peer_trid = NULL,
 	.qpair_get_local_trid = NULL,
 	.qpair_get_listen_trid = NULL,
@@ -122,6 +121,9 @@ DEFINE_STUB(spdk_bdev_module_claim_bdev, int,
 	     struct spdk_bdev_module *module), 0);
 DEFINE_STUB_V(spdk_bdev_module_release_bdev, (struct spdk_bdev *bdev));
 DEFINE_STUB(spdk_bdev_get_block_size, uint32_t, (const struct spdk_bdev *bdev), 512);
+DEFINE_STUB(spdk_bdev_get_num_blocks, uint64_t, (const struct spdk_bdev *bdev), 1024);
+
+DEFINE_STUB(spdk_nvmf_ctrlr_async_event_ns_notice, int, (struct spdk_nvmf_ctrlr *ctrlr), 0);
 
 const char *
 spdk_nvme_transport_id_trtype_str(enum spdk_nvme_transport_type trtype)
@@ -264,11 +266,15 @@ create_transport_test(void)
 {
 	const struct spdk_nvmf_transport_ops *ops = NULL;
 	struct spdk_nvmf_transport_opts opts = { 0 };
+	struct spdk_nvmf_target_opts tgt_opts = {
+		.name = "nvmf_test_tgt",
+		.max_subsystems = 0
+	};
 
 	allocate_threads(8);
 	set_thread(0);
 
-	g_nvmf_tgt = spdk_nvmf_tgt_create(2);
+	g_nvmf_tgt = spdk_nvmf_tgt_create(&tgt_opts);
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tgt != NULL);
 
 	ops = spdk_nvmf_get_transport_ops((enum spdk_nvme_transport_type) SPDK_NVMF_TRTYPE_FC);
@@ -367,9 +373,9 @@ online_fc_port_test(void)
 	if (err == 0) {
 		uint32_t i;
 		for (i = 0; i < fc_port->num_io_queues; i++) {
-			CU_ASSERT(fc_port->io_queues[i].fc_poll_group != 0);
-			CU_ASSERT(fc_port->io_queues[i].fc_poll_group != 0);
-			CU_ASSERT(fc_port->io_queues[i].fc_poll_group->hwqp_count != 0);
+			CU_ASSERT(fc_port->io_queues[i].fgroup != 0);
+			CU_ASSERT(fc_port->io_queues[i].fgroup != 0);
+			CU_ASSERT(fc_port->io_queues[i].fgroup->hwqp_count != 0);
 		}
 	}
 }
@@ -432,7 +438,7 @@ remove_hwqps_from_poll_groups_test(void)
 	for (i = 0; i < fc_port->num_io_queues; i++) {
 		spdk_nvmf_fc_poll_group_remove_hwqp(&fc_port->io_queues[i]);
 		poll_threads();
-		CU_ASSERT(fc_port->io_queues[i].fc_poll_group == 0);
+		CU_ASSERT(fc_port->io_queues[i].fgroup == 0);
 	}
 }
 

@@ -211,7 +211,6 @@ ftl_wptr_from_band(struct ftl_band *band)
 		}
 	}
 
-	assert(false);
 	return NULL;
 }
 
@@ -223,6 +222,7 @@ ftl_md_write_fail(struct ftl_io *io, int status)
 	char buf[128];
 
 	wptr = ftl_wptr_from_band(band);
+	assert(wptr);
 
 	SPDK_ERRLOG("Metadata write failed @ppa: %s, status: %d\n",
 		    ftl_ppa2str(wptr->ppa, buf, sizeof(buf)), status);
@@ -240,6 +240,7 @@ ftl_md_write_cb(struct ftl_io *io, void *arg, int status)
 	size_t id;
 
 	wptr = ftl_wptr_from_band(band);
+	assert(wptr);
 
 	if (status) {
 		ftl_md_write_fail(io, status);
@@ -395,6 +396,20 @@ ftl_check_read_thread(const struct spdk_ftl_dev *dev)
 	return dev->read_thread.thread == spdk_get_thread();
 }
 
+struct spdk_io_channel *
+ftl_get_io_channel(const struct spdk_ftl_dev *dev)
+{
+	if (ftl_check_core_thread(dev)) {
+		return dev->core_thread.ioch;
+	}
+	if (ftl_check_read_thread(dev)) {
+		return dev->read_thread.ioch;
+	}
+
+	assert(0);
+	return NULL;
+}
+
 int
 ftl_io_erase(struct ftl_io *io)
 {
@@ -502,6 +517,7 @@ ftl_close_direct_wptr(struct ftl_band *band)
 {
 	struct ftl_wptr *wptr = ftl_wptr_from_band(band);
 
+	assert(wptr);
 	assert(wptr->direct_mode);
 	assert(band->state == FTL_BAND_STATE_CLOSED);
 
@@ -757,13 +773,14 @@ static void
 ftl_wptr_pad_band(struct ftl_wptr *wptr)
 {
 	struct spdk_ftl_dev *dev = wptr->dev;
-	size_t size = ftl_rwb_num_acquired(dev->rwb, FTL_RWB_TYPE_INTERNAL) +
-		      ftl_rwb_num_acquired(dev->rwb, FTL_RWB_TYPE_USER);
+	size_t size = ftl_rwb_num_pending(dev->rwb);
 	size_t blocks_left, rwb_size, pad_size;
 
 	blocks_left = ftl_wptr_user_lbks_left(wptr);
+	assert(size <= blocks_left);
+	assert(blocks_left % dev->xfer_size == 0);
 	rwb_size = ftl_rwb_size(dev->rwb) - size;
-	pad_size = spdk_min(blocks_left, rwb_size);
+	pad_size = spdk_min(blocks_left - size, rwb_size);
 
 	/* Pad write buffer until band is full */
 	ftl_rwb_pad(dev, pad_size);
@@ -773,8 +790,7 @@ static void
 ftl_wptr_process_shutdown(struct ftl_wptr *wptr)
 {
 	struct spdk_ftl_dev *dev = wptr->dev;
-	size_t size = ftl_rwb_num_acquired(dev->rwb, FTL_RWB_TYPE_INTERNAL) +
-		      ftl_rwb_num_acquired(dev->rwb, FTL_RWB_TYPE_USER);
+	size_t size = ftl_rwb_num_pending(dev->rwb);
 	size_t num_active = dev->xfer_size * ftl_rwb_get_active_batches(dev->rwb);
 
 	num_active = num_active ? num_active : dev->xfer_size;
@@ -1277,7 +1293,7 @@ ftl_nv_cache_write_header(struct ftl_nv_cache *nv_cache, bool shutdown,
 	struct ftl_io_channel *ioch;
 
 	bdev = spdk_bdev_desc_get_bdev(nv_cache->bdev_desc);
-	ioch = spdk_io_channel_get_ctx(dev->ioch);
+	ioch = spdk_io_channel_get_ctx(ftl_get_io_channel(dev));
 
 	memset(hdr, 0, spdk_bdev_get_block_size(bdev));
 
@@ -1299,7 +1315,7 @@ ftl_nv_cache_scrub(struct ftl_nv_cache *nv_cache, spdk_bdev_io_completion_cb cb_
 	struct ftl_io_channel *ioch;
 	struct spdk_bdev *bdev;
 
-	ioch = spdk_io_channel_get_ctx(dev->ioch);
+	ioch = spdk_io_channel_get_ctx(ftl_get_io_channel(dev));
 	bdev = spdk_bdev_desc_get_bdev(nv_cache->bdev_desc);
 
 	return spdk_bdev_write_zeroes_blocks(nv_cache->bdev_desc, ioch->cache_ioch, 1,
@@ -1800,7 +1816,7 @@ ftl_dev_needs_defrag(struct spdk_ftl_dev *dev)
 		return false;
 	}
 
-	if (dev->df_band) {
+	if (ftl_reloc_is_defrag_active(dev->reloc)) {
 		return false;
 	}
 
@@ -1875,10 +1891,9 @@ ftl_process_relocs(struct spdk_ftl_dev *dev)
 	struct ftl_band *band;
 
 	if (ftl_dev_needs_defrag(dev)) {
-		band = dev->df_band = ftl_select_defrag_band(dev);
-
+		band = ftl_select_defrag_band(dev);
 		if (band) {
-			ftl_reloc_add(dev->reloc, band, 0, ftl_num_band_lbks(dev), 0);
+			ftl_reloc_add(dev->reloc, band, 0, ftl_num_band_lbks(dev), 0, true);
 			ftl_trace_defrag_band(dev, band);
 		}
 	}
@@ -2105,13 +2120,9 @@ _ftl_flush(void *ctx)
 }
 
 int
-spdk_ftl_flush(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
+ftl_flush_rwb(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
 {
 	struct ftl_flush *flush;
-
-	if (!dev->initialized) {
-		return -EBUSY;
-	}
 
 	flush = ftl_flush_init(dev, cb_fn, cb_arg);
 	if (!flush) {
@@ -2120,6 +2131,16 @@ spdk_ftl_flush(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
 
 	spdk_thread_send_msg(ftl_get_core_thread(dev), _ftl_flush, flush);
 	return 0;
+}
+
+int
+spdk_ftl_flush(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
+{
+	if (!dev->initialized) {
+		return -EBUSY;
+	}
+
+	return ftl_flush_rwb(dev, cb_fn, cb_arg);
 }
 
 static void
@@ -2135,6 +2156,12 @@ ftl_process_anm_event(struct ftl_anm_event *event)
 	struct ftl_band *band;
 	size_t lbkoff;
 
+	/* Drop any ANM requests until the device is initialized */
+	if (!dev->initialized) {
+		ftl_anm_event_complete(event);
+		return;
+	}
+
 	if (!ftl_check_core_thread(dev)) {
 		spdk_thread_send_msg(ftl_get_core_thread(dev), _ftl_process_anm_event, event);
 		return;
@@ -2143,7 +2170,7 @@ ftl_process_anm_event(struct ftl_anm_event *event)
 	band = ftl_band_from_ppa(dev, event->ppa);
 	lbkoff = ftl_band_lbkoff_from_ppa(band, event->ppa);
 
-	ftl_reloc_add(dev->reloc, band, lbkoff, event->num_lbks, 0);
+	ftl_reloc_add(dev->reloc, band, lbkoff, event->num_lbks, 0, false);
 	ftl_anm_event_complete(event);
 }
 

@@ -196,6 +196,15 @@ bool spdk_sock_is_ipv6(struct spdk_sock *sock);
 bool spdk_sock_is_ipv4(struct spdk_sock *sock);
 
 /**
+ * Check whether the socket is currently connected.
+ *
+ * \param sock Socket to check
+ *
+ * \return true if the socket is connected or false otherwise.
+ */
+bool spdk_sock_is_connected(struct spdk_sock *sock);
+
+/**
  * Callback function for spdk_sock_group_add_sock().
  *
  * \param arg Argument for the callback function.
@@ -249,7 +258,7 @@ int spdk_sock_group_remove_sock(struct spdk_sock_group *group, struct spdk_sock 
  *
  * \param group Group to poll.
  *
- * \return 0 on success, -1 on failure.
+ * \return the number of events on success, -1 on failure.
  */
 int spdk_sock_group_poll(struct spdk_sock_group *group);
 

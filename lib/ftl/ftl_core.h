@@ -90,6 +90,8 @@ struct ftl_thread {
 	/* Thread on which the poller is running */
 	struct spdk_thread			*thread;
 
+	/* IO channel */
+	struct spdk_io_channel			*ioch;
 	/* Poller */
 	struct spdk_poller			*poller;
 	/* Poller's function */
@@ -155,13 +157,12 @@ struct spdk_ftl_dev {
 	/* Indicates the device is about to be stopped */
 	int					halt;
 
+	/* Status to return for halt completion callback */
+	int					halt_complete_status;
 	/* Initializaton context */
 	struct ftl_init_context			init_ctx;
 	/* Destruction context */
 	struct ftl_init_context			fini_ctx;
-
-	/* IO channel */
-	struct spdk_io_channel			*ioch;
 
 	/* NVMe controller */
 	struct spdk_nvme_ctrlr			*ctrlr;
@@ -192,8 +193,6 @@ struct spdk_ftl_dev {
 
 	/* Array of bands */
 	struct ftl_band				*bands;
-	/* Band being curently defraged */
-	struct ftl_band				*df_band;
 	/* Number of operational bands */
 	size_t					num_bands;
 	/* Next write band */
@@ -276,7 +275,7 @@ void	ftl_apply_limits(struct spdk_ftl_dev *dev);
 void	ftl_io_read(struct ftl_io *io);
 void	ftl_io_write(struct ftl_io *io);
 int	ftl_io_erase(struct ftl_io *io);
-int	ftl_io_flush(struct ftl_io *io);
+int	ftl_flush_rwb(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg);
 int	ftl_current_limit(const struct spdk_ftl_dev *dev);
 int	ftl_invalidate_addr(struct spdk_ftl_dev *dev, struct ftl_ppa ppa);
 int	ftl_task_core(void *ctx);
@@ -300,6 +299,9 @@ int	ftl_nv_cache_write_header(struct ftl_nv_cache *nv_cache, bool shutdown,
 				  spdk_bdev_io_completion_cb cb_fn, void *cb_arg);
 int	ftl_nv_cache_scrub(struct ftl_nv_cache *nv_cache, spdk_bdev_io_completion_cb cb_fn,
 			   void *cb_arg);
+
+struct spdk_io_channel *
+ftl_get_io_channel(const struct spdk_ftl_dev *dev);
 
 #define ftl_to_ppa(addr) \
 	(struct ftl_ppa) { .ppa = (uint64_t)(addr) }
