@@ -978,8 +978,9 @@ ftl_submit_read(struct ftl_io *io)
 
 	assert(LIST_EMPTY(&io->children));
 
-	SPDK_NOTICELOG("[ocssd] read mode = %d, ppa 0x%x, grp %d, pu %d, chk %d, lbk %d\n",
-					ftl_io_mode_ppa(io), ppa, io->ppa.grp, io->ppa.pu, io->ppa.chk, io->ppa.lbk);
+	//SPDK_NOTICELOG("[ocssd] read mode = %d, ppa 0x%x, grp %d, pu %d, chk %d, lbk %d\n",
+	//				ftl_io_mode_ppa(io), ppa, io->ppa.grp, io->ppa.pu, io->ppa.chk, io->ppa.lbk);
+
 	while (io->pos < io->lbk_cnt) {
 		if (ftl_io_mode_ppa(io)) {
 			lbk_cnt = rc = ftl_ppa_read_next_ppa(io, &ppa);

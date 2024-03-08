@@ -92,8 +92,8 @@ _nvme_ocssd_ns_cmd_vector_rw_with_md(struct spdk_nvme_ns *ns,
 	struct nvme_payload	payload;
 	uint32_t valid_flags = SPDK_OCSSD_IO_FLAGS_LIMITED_RETRY;
 
-	SPDK_NOTICELOG("[ocssd] io_flags %x, buffer %x, lba_list %x, num_lbas %x\n",
-					io_flags, buffer, lba_list, num_lbas);
+	//SPDK_NOTICELOG("[ocssd] io_flags %x, buffer %x, lba_list %x, num_lbas %x\n",
+	//				io_flags, buffer, lba_list, num_lbas);
 
 	if (io_flags & ~valid_flags) {
 		return -EINVAL;
