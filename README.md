@@ -219,3 +219,12 @@ vfio.
 For additional details on how to get more involved in the community, including
 [contributing code](http://www.spdk.io/development) and participating in discussions and other activities, please
 refer to [spdk.io](http://www.spdk.io/community)
+
+<a id="Create OCSSD FTL bdev"></a>
+## Create OCSSD FTL bdev
+
+To use OCSSD FTL with vectored CMDs (91h/92h), it is recommended to construct FTL bdev via rpc scripts.
+This is an example to construct FTL bedv using FADU SSD which has 64 LUNs, and 0000:01:00.0 bdf.
+~~~{.sh}
+./scripts/rpc.py construct_ftl_bdev -b ftl0 -l 0-63 -a 0000:01:00.0
+~~~
